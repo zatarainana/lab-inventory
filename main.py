@@ -13,8 +13,7 @@ from pydantic import BaseModel
 from pathlib import Path
 
 # --- Configuration ---
-# Use environment variable for database path or fallback to local file
-DATABASE_PATH = os.getenv("DATABASE_PATH", "inventory.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/inventory.db")  # Render uses /tmp
 EXCEL_FILE_NAME = "inventory.xlsx"
 
 
@@ -242,6 +241,15 @@ async def startup_event():
         log_error(f"Startup failed: {str(e)}")
         raise
 
+@app.on_event("startup")
+async def startup_event():
+    try:
+        initialize_database()  # Recreates tables
+        result = excel_to_db()  # Reimports data
+        logger.info(f"Startup result: {result}")
+    except Exception as e:
+        log_error(f"Startup failed: {str(e)}")
+        raise
 
 # --- API Endpoints ---
 @app.get("/", tags=["Health"])
@@ -253,9 +261,17 @@ async def health_check():
         "time": datetime.now().isoformat(),
         "database_path": DATABASE_PATH
     }
-
-
-# [Rest of your endpoint implementations remain the same...]
+@app.get("/reagents", response_model=List[Reagent], tags=["Reagents"])
+async def get_reagents():
+    """Get all reagents"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reagents")
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        log_error(f"Error fetching reagents: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database error")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8005)
