@@ -110,16 +110,22 @@ async def health_check():
     }
 
 
-@app.get("/reagents", response_model=Dict[str, List[Reagent]], tags=["Reagents"])
-async def get_reagents():
-    try:
-        with get_db() as conn:
-            reagents = conn.execute("SELECT * FROM reagents").fetchall()
-            return {"reagents": [dict(row) for row in reagents]}
-    except Exception as e:
-        logging.error(f"Database error: {str(e)}")
-        raise HTTPException(500, "Database error")
+def get_db_connection():
+    pass
 
+
+@app.get("/reagents", response_model=List[Reagent], tags=["Reagents"])
+async def get_reagents():
+    """Get all reagents"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reagents")
+            reagents = [dict(row) for row in cursor.fetchall()]
+            return {"reagents": reagents}  # Wrap in object with reagents key
+    except Exception as e:
+        log_error(f"Error fetching reagents: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database error")
 
 @app.get("/reagents/history", response_model=Dict[str, List[HistoryEntry]], tags=["History"])
 async def get_history():
