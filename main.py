@@ -1,27 +1,25 @@
-from fastapi import FastAPI, HTTPException, Body, Depends
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional, Dict
 import sqlite3
 import pandas as pd
 import os
 import logging
 from datetime import datetime
-import traceback
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, Any, List
-import uvicorn
 from contextlib import contextmanager
-from pydantic import BaseModel
-from pathlib import Path
+import uvicorn
 
-# --- Configuration ---
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/inventory.db")  # Render uses /tmp
+# Configuration
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/inventory.db")
 EXCEL_FILE_NAME = "inventory.xlsx"
 
 
-# --- Models ---
-class ReagentBase(BaseModel):
+# Models
+class Reagent(BaseModel):
+    id: int
     name: str
     supplier_code: Optional[str] = None
-    datasheet_url: Optional[str] = None
     category: Optional[str] = None
     type: Optional[str] = None
     location: Optional[str] = None
@@ -31,118 +29,61 @@ class ReagentBase(BaseModel):
     unit: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[str] = None
-
-
-class ReagentCreate(ReagentBase):
-    pass
-
-
-class Reagent(ReagentBase):
-    id: int
     last_updated: str
-
-    class Config:
-        from_attributes = True  # Updated from orm_mode
 
 
 class HistoryEntry(BaseModel):
+    id: int
     reagent_id: int
     user: str
     change: float
     notes: Optional[str] = None
-    timestamp: str = datetime.now().isoformat()
+    timestamp: str
 
 
-class HistoryRecord(HistoryEntry):
-    id: int
-
-    class Config:
-        from_attributes = True  # Updated from orm_mode
-
-
-class QuantityUpdate(BaseModel):
-    user: str
-    change: float
-    notes: Optional[str] = None
-
-
-# --- Database Utilities ---
+# Database setup
 @contextmanager
-def get_db_connection():
-    """Context manager for database connections"""
-    conn = None
+def get_db():
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        conn.row_factory = sqlite3.Row
         yield conn
-    except sqlite3.Error as e:
-        logger.error(f"Database error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database operation failed")
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 
-@contextmanager
-def get_db_cursor():
-    """Context manager for database cursors"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            yield cursor
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
+def init_db():
+    with get_db() as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS reagents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            supplier_code TEXT,
+            category TEXT,
+            type TEXT,
+            location TEXT,
+            sublocation TEXT,
+            status TEXT,
+            quantity REAL DEFAULT 0,
+            unit TEXT,
+            notes TEXT,
+            tags TEXT,
+            last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS reagent_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reagent_id INTEGER NOT NULL,
+            user TEXT NOT NULL,
+            change REAL NOT NULL,
+            notes TEXT,
+            timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(reagent_id) REFERENCES reagents(id) ON DELETE CASCADE
+        )""")
 
 
-def initialize_database():
-    """Initialize database with tables"""
-    try:
-        logger.info("Initializing database...")
-
-        # Ensure directory exists for the database file
-        db_dir = os.path.dirname(DATABASE_PATH)
-        if db_dir:  # Only try to create if path contains directories
-            os.makedirs(db_dir, exist_ok=True)
-
-        with get_db_cursor() as cursor:
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS reagents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                supplier_code TEXT,
-                datasheet_url TEXT,
-                category TEXT,
-                type TEXT,
-                location TEXT,
-                sublocation TEXT,
-                status TEXT,
-                quantity REAL DEFAULT 0,
-                unit TEXT,
-                notes TEXT,
-                tags TEXT,
-                last_updated TEXT DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS reagent_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                reagent_id INTEGER NOT NULL,
-                user TEXT NOT NULL,
-                change REAL NOT NULL,
-                notes TEXT,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(reagent_id) REFERENCES reagents(id) ON DELETE CASCADE
-            )''')
-
-        logger.info(f"Database initialized successfully at {DATABASE_PATH}")
-    except Exception as e:
-        log_error(f"Database initialization failed: {str(e)}")
-        raise
-
-
-# --- Application Setup ---
+# FastAPI app
 app = FastAPI(
     title="Lab Inventory API",
     version="1.1.0",
@@ -150,128 +91,77 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("uvicorn")
-
-# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
+    allow_headers=["*"]
 )
 
 
-def log_error(message):
-    """Log errors with traceback"""
-    logger.error(message)
-    logger.error(traceback.format_exc())
-
-
-# --- Data Processing ---
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean and validate the input data"""
-    df = df.fillna('')
-    required_columns = ['name']
-    for col in required_columns:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}")
-
-    if 'quantity' in df.columns:
-        df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
-
-    return df.replace('', None)
-
-
-def excel_to_db() -> Dict[str, Any]:
-    """Import data from Excel to database"""
-    try:
-        if not os.path.exists(EXCEL_FILE_NAME):
-            logger.warning(f"Excel file {EXCEL_FILE_NAME} not found!")
-            return {"warning": "Excel file not found"}
-
-        df = pd.read_excel(EXCEL_FILE_NAME)
-        df = clean_data(df)
-        df['last_updated'] = datetime.now().isoformat()
-
-        success_count = 0
-        error_count = 0
-        error_messages = []
-
-        with get_db_cursor() as cursor:
-            for _, row in df.iterrows():
-                try:
-                    row_dict = {k: (v if pd.notna(v) else None) for k, v in row.to_dict().items()}
-                    columns = ', '.join(row_dict.keys())
-                    placeholders = ', '.join(['?'] * len(row_dict))
-                    sql = f"INSERT OR REPLACE INTO reagents ({columns}) VALUES ({placeholders})"
-                    cursor.execute(sql, tuple(row_dict.values()))
-                    success_count += 1
-                except Exception as e:
-                    error_count += 1
-                    error_messages.append(f"Error inserting row {_}: {str(e)}")
-
-        return {
-            "total_records": len(df),
-            "successful": success_count,
-            "failed": error_count,
-            "errors": error_messages if error_count > 0 else None
-        }
-    except Exception as e:
-        log_error(f"Excel import failed: {str(e)}")
-        return {"error": str(e)}
-
-
-# --- Event Handlers ---
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application"""
-    try:
-        initialize_database()
-        result = excel_to_db()
-        if isinstance(result, dict) and result.get('error'):
-            if result.get('successful', 0) > 0:
-                logger.warning("Started with partial data")
-            else:
-                raise RuntimeError("Failed to import any data")
-    except Exception as e:
-        log_error(f"Startup failed: {str(e)}")
-        raise
-
-@app.on_event("startup")
-async def startup_event():
-    try:
-        initialize_database()  # Recreates tables
-        result = excel_to_db()  # Reimports data
-        logger.info(f"Startup result: {result}")
-    except Exception as e:
-        log_error(f"Startup failed: {str(e)}")
-        raise
-
-# --- API Endpoints ---
+# API Endpoints
 @app.get("/", tags=["Health"])
 async def health_check():
     return {
         "status": "running",
         "app": "Lab Inventory API",
         "version": "1.1.0",
-        "time": datetime.now().isoformat(),
-        "database_path": DATABASE_PATH
+        "time": datetime.now().isoformat()
     }
-@app.get("/reagents", response_model=List[Reagent], tags=["Reagents"])
+
+
+@app.get("/reagents", response_model=Dict[str, List[Reagent]], tags=["Reagents"])
 async def get_reagents():
-    """Get all reagents"""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM reagents")
-            return [dict(row) for row in cursor.fetchall()]
+        with get_db() as conn:
+            reagents = conn.execute("SELECT * FROM reagents").fetchall()
+            return {"reagents": [dict(row) for row in reagents]}
     except Exception as e:
-        log_error(f"Error fetching reagents: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database error")
+        logging.error(f"Database error: {str(e)}")
+        raise HTTPException(500, "Database error")
+
+
+@app.get("/reagents/history", response_model=Dict[str, List[HistoryEntry]], tags=["History"])
+async def get_history():
+    try:
+        with get_db() as conn:
+            history = conn.execute("SELECT * FROM reagent_history").fetchall()
+            return {"history": [dict(row) for row in history]}
+    except Exception as e:
+        logging.error(f"Database error: {str(e)}")
+        raise HTTPException(500, "Database error")
+
+
+@app.put("/reagents/{reagent_id}", tags=["Reagents"])
+async def update_reagent(reagent_id: int, update: Dict):
+    try:
+        with get_db() as conn:
+            # Update reagent
+            conn.execute(
+                "UPDATE reagents SET quantity = ?, last_updated = ? WHERE id = ?",
+                (update["quantity"], datetime.now().isoformat(), reagent_id)
+            )
+
+            # Add history entry
+            conn.execute(
+                """INSERT INTO reagent_history 
+                (reagent_id, user, change, notes) 
+                VALUES (?, ?, ?, ?)""",
+                (reagent_id, update["user"], update["change"], update.get("notes"))
+            )
+
+            return {"status": "success"}
+    except Exception as e:
+        logging.error(f"Update error: {str(e)}")
+        raise HTTPException(500, "Update failed")
+
+
+# Startup
+@app.on_event("startup")
+async def startup():
+    init_db()
+    # Add your Excel import logic here if needed
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8005)
