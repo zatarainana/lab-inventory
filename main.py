@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -114,6 +114,10 @@ def get_db_connection():
     pass
 
 
+def log_error(param):
+    pass
+
+
 @app.get("/reagents", response_model=List[Reagent], tags=["Reagents"])
 async def get_reagents():
     """Get all reagents"""
@@ -161,6 +165,51 @@ async def update_reagent(reagent_id: int, update: Dict):
         logging.error(f"Update error: {str(e)}")
         raise HTTPException(500, "Update failed")
 
+
+@app.put("/reagents/{reagent_id}/quantity", tags=["Reagents"])
+async def update_quantity(
+        reagent_id: int,
+        update: Dict = Body(...)
+):
+    """Update reagent quantity and log change"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get current quantity
+            cursor.execute("SELECT quantity FROM reagents WHERE id=?", (reagent_id,))
+            result = cursor.fetchone()
+            if not result:
+                raise HTTPException(404, "Reagent not found")
+
+            current_qty = result['quantity']
+            new_qty = current_qty + update.get('change', 0)
+
+            # Update reagent
+            cursor.execute(
+                "UPDATE reagents SET quantity=?, last_updated=? WHERE id=?",
+                (new_qty, datetime.now().isoformat(), reagent_id)
+            )
+
+            # Log history
+            cursor.execute(
+                """INSERT INTO reagent_history 
+                (reagent_id, user, change, notes, timestamp)
+                VALUES (?, ?, ?, ?, ?)""",
+                (
+                    reagent_id,
+                    update.get('user', 'anonymous'),
+                    update.get('change', 0),
+                    update.get('notes', 'Quantity adjusted'),
+                    datetime.now().isoformat()
+                )
+            )
+
+            return {"status": "success", "new_quantity": new_qty}
+
+    except Exception as e:
+        log_error(f"Quantity update failed: {str(e)}")
+        raise HTTPException(500, "Database error")
 
 # Startup
 @app.on_event("startup")
