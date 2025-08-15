@@ -61,11 +61,10 @@ def get_db_connection():
     """Ensure database connection with proper error handling"""
     conn = None
     try:
-        # Ensure database directory exists
+        # Create database in current working directory
         db_dir = os.path.dirname(DATABASE_PATH)
-        if db_dir:
+        if db_dir:  # Only create directory if path contains subdirectories
             os.makedirs(db_dir, exist_ok=True)
-            os.chmod(db_dir, 0o777)
 
         conn = sqlite3.connect(DATABASE_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -83,10 +82,10 @@ def get_db_connection():
 def initialize_database():
     """Initialize database tables"""
     try:
+        # This will now create the database in Render's writable space
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Create reagents table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS reagents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +103,6 @@ def initialize_database():
                 last_updated TEXT DEFAULT CURRENT_TIMESTAMP
             )''')
 
-            # Create history table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS reagent_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +115,7 @@ def initialize_database():
             )''')
 
             conn.commit()
-        logger.info("Database initialized successfully")
+        logger.info(f"Database initialized successfully at {DATABASE_PATH}")
     except Exception as e:
         logger.error(f"Database initialization failed: {str(e)}")
         raise
