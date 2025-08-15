@@ -178,7 +178,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # Explicitly include PUT
     allow_headers=["*"],
     expose_headers=["*"]
 )
@@ -227,16 +227,16 @@ async def get_reagent(reagent_id: int):
 
 
 @app.put("/reagents/{reagent_id}/quantity", tags=["Reagents"])
-async def update_quantity(
+async def update_reagent_quantity(
         reagent_id: int,
         update: QuantityUpdate
 ):
-    """Update reagent quantity with history tracking"""
+    """Update reagent quantity with proper validation"""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Get current quantity
+            # 1. Verify reagent exists
             cursor.execute("SELECT quantity FROM reagents WHERE id=?", (reagent_id,))
             result = cursor.fetchone()
             if not result:
@@ -245,13 +245,20 @@ async def update_quantity(
             current_qty = result['quantity']
             new_qty = current_qty + update.change
 
-            # Update reagent
+            # 2. Validate new quantity
+            if new_qty < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot remove {abs(update.change)} when only {current_qty} available"
+                )
+
+            # 3. Update database
             cursor.execute(
                 "UPDATE reagents SET quantity=?, last_updated=? WHERE id=?",
                 (new_qty, datetime.now().isoformat(), reagent_id)
             )
 
-            # Add history entry
+            # 4. Record in history
             cursor.execute(
                 """INSERT INTO reagent_history 
                 (reagent_id, user, change, notes, timestamp)
@@ -266,14 +273,21 @@ async def update_quantity(
             )
 
             conn.commit()
+
             return {
                 "status": "success",
                 "new_quantity": new_qty,
                 "reagent_id": reagent_id
             }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Quantity update failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update quantity: {str(e)}"
+        )
 
 
 @app.get("/reagents/history", response_model=Dict[str, List[HistoryEntry]], tags=["History"])
